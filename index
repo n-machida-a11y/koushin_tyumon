@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>注文書OCRアプリ</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+      .loader {
+        border-top-color: #3498db;
+        -webkit-animation: spinner 1.5s linear infinite;
+        animation: spinner 1.5s linear infinite;
+      }
+      @keyframes spinner {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      body.modal-open { overflow: hidden; }
+      /* タブのアクティブスタイル */
+      .tab-active {
+        border-bottom: 2px solid #2563eb;
+        color: #2563eb;
+        font-weight: bold;
+      }
+      /* テーブルのセルスタイル */
+      th, td {
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body class="bg-gray-50 min-h-screen text-gray-800 pb-20">
+    <div class="container mx-auto px-4 py-4 max-w-4xl">
+      
+      <!-- ヘッダー -->
+      <div class="mb-6 text-center">
+        <h1 class="text-2xl md:text-3xl font-bold text-blue-600 mb-1">
+          <i class="fas fa-file-invoice p-2"></i>注文書 自動読み取り
+        </h1>
+        <p class="text-xs md:text-sm text-gray-600">Powered by Gemini AI</p>
+      </div>
+
+      <!-- タブナビゲーション -->
+      <div class="flex border-b border-gray-200 mb-6 bg-white rounded-t-lg shadow-sm">
+        <button onclick="switchTab('scan')" id="tab-scan" class="flex-1 py-3 px-4 text-center text-sm font-medium text-gray-500 hover:text-gray-700 focus:outline-none tab-active">
+          <i class="fas fa-camera mr-2"></i>スキャン登録
+        </button>
+        <button onclick="switchTab('history')" id="tab-history" class="flex-1 py-3 px-4 text-center text-sm font-medium text-gray-500 hover:text-gray-700 focus:outline-none">
+          <i class="fas fa-history mr-2"></i>登録履歴
+        </button>
+      </div>
+
+      <!-- ================= スキャン画面 ================= -->
+      <div id="view-scan">
+        <!-- 画像アップロードエリア -->
+        <div class="bg-white rounded-lg shadow-sm p-4 mb-6 border border-gray-200">
+          <div class="flex items-center justify-center w-full mb-4">
+              <label for="file-upload" class="flex flex-col items-center justify-center w-full h-32 border-2 border-blue-100 border-dashed rounded-lg cursor-pointer bg-blue-50 hover:bg-blue-100 transition">
+                  <div class="flex flex-col items-center justify-center pt-5 pb-6">
+                      <i class="fas fa-camera text-3xl text-blue-400 mb-2"></i>
+                      <p class="mb-1 text-sm text-blue-600 font-bold">写真を撮る / ファイルを選択</p>
+                      <p class="text-xs text-gray-500">複数選択可 (JPG, PNG)</p>
+                  </div>
+                  <!-- ファイル選択時に発火 -->
+                  <input id="file-upload" type="file" class="hidden" accept="image/*" multiple onchange="handleFileSelect(this)" />
+              </label>
+          </div>
+          
+          <!-- 解析ボタン -->
+          <button id="analyze-btn" onclick="startBatchOcr()" disabled class="w-full bg-gray-300 text-white font-bold py-3 px-4 rounded shadow-sm cursor-not-allowed transition duration-200 flex justify-center items-center">
+            <i class="fas fa-magic mr-2"></i>画像を選択してください
+          </button>
+
+          <!-- 選択ファイル一覧 -->
+          <div id="file-list-area" class="mt-4 hidden">
+            <h3 class="text-xs font-semibold text-gray-500 mb-1">選択中のファイル: <span id="file-count">0</span>件</h3>
+            <ul id="file-list" class="text-xs text-gray-600 space-y-1 max-h-32 overflow-y-auto bg-gray-50 p-2 rounded border border-gray-100"></ul>
+          </div>
+        </div>
+
+        <!-- 解析結果リスト -->
+        <div id="results-container" class="space-y-4"></div>
+      </div>
+
+      <!-- ================= 履歴画面 ================= -->
+      <div id="view-history" class="hidden">
+        <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+          <div class="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50">
+            <h2 class="font-bold text-gray-700 text-sm"><i class="fas fa-list mr-2"></i>最近の登録データ (最新50件)</h2>
+            <button onclick="loadHistory()" class="text-blue-600 hover:text-blue-800 text-xs font-semibold">
+              <i class="fas fa-sync-alt mr-1"></i>更新
+            </button>
+          </div>
+          
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 text-xs sm:text-sm">
+              <thead class="bg-gray-50">
+                <tr>
+                  <th scope="col" class="px-3 py-3 text-left font-medium text-gray-500 tracking-wider">日時</th>
+                  <th scope="col" class="px-3 py-3 text-left font-medium text-gray-500 tracking-wider">品番</th>
+                  <th scope="col" class="px-3 py-3 text-right font-medium text-gray-500 tracking-wider">数量</th>
+                  <th scope="col" class="px-3 py-3 text-left font-medium text-gray-500 tracking-wider">納期</th>
+                  <th scope="col" class="px-3 py-3 text-left font-medium text-gray-500 tracking-wider">受注日</th>
+                  <th scope="col" class="px-3 py-3 text-left font-medium text-gray-500 tracking-wider">客先</th>
+                  <th scope="col" class="px-3 py-3 text-left font-medium text-gray-500 tracking-wider">注文番号</th>
+                  <th scope="col" class="px-3 py-3 text-left font-medium text-gray-500 tracking-wider">画像</th>
+                </tr>
+              </thead>
+              <tbody id="history-table-body" class="bg-white divide-y divide-gray-200">
+                <!-- JSでデータ挿入 -->
+              </tbody>
+            </table>
+          </div>
+          <div id="history-loading" class="p-8 text-center text-gray-500 hidden">
+            <i class="fas fa-spinner fa-spin mr-2"></i>読み込み中...
+          </div>
+          <div id="history-empty" class="p-8 text-center text-gray-500 hidden">
+            データがありません
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- 編集・詳細確認用モーダル -->
+    <div id="edit-modal" class="fixed inset-0 z-50 hidden overflow-y-auto" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+      <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+        <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true" onclick="closeModal()"></div>
+        <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+        <div class="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-2xl w-full">
+          <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+            <div class="sm:flex sm:items-start">
+              <div class="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left w-full">
+                <h3 class="text-lg leading-6 font-medium text-gray-900 mb-4 flex justify-between items-center" id="modal-title">
+                  <span><i class="fas fa-edit text-blue-500 mr-2"></i>内容の確認・修正</span>
+                  <button onclick="closeModal()" class="text-gray-400 hover:text-gray-500"><i class="fas fa-times"></i></button>
+                </h3>
+                
+                <form id="modal-form" class="space-y-3 text-left">
+                  <input type="hidden" name="itemIndex">
+                  <input type="hidden" name="fileName">
+                  <div class="grid grid-cols-1 gap-3">
+                    <div>
+                      <label class="block text-xs font-bold text-gray-700">品番 <span class="text-red-500">*</span></label>
+                      <input type="text" name="partNumber" class="mt-1 block w-full rounded border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 border p-2 bg-yellow-50">
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                      <div>
+                        <label class="block text-xs font-bold text-gray-700">数量</label>
+                        <input type="text" name="quantity" class="mt-1 block w-full rounded border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 border p-2">
+                      </div>
+                      <div>
+                        <label class="block text-xs font-bold text-gray-700">納期</label>
+                        <!-- type="date" に変更 -->
+                        <input type="date" name="deliveryDate" class="mt-1 block w-full rounded border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 border p-2">
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                      <div>
+                        <label class="block text-xs font-bold text-gray-700">受注日</label>
+                        <!-- type="date" に変更 -->
+                        <input type="date" name="orderDate" class="mt-1 block w-full rounded border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 border p-2">
+                      </div>
+                      <div>
+                        <label class="block text-xs font-bold text-gray-700">製番</label>
+                        <input type="text" name="mfgNumber" class="mt-1 block w-full rounded border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 border p-2">
+                      </div>
+                    </div>
+                    <div>
+                      <label class="block text-xs font-bold text-gray-700">注文番号</label>
+                      <input type="text" name="orderNumber" class="mt-1 block w-full rounded border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 border p-2">
+                    </div>
+                    <div>
+                      <label class="block text-xs font-bold text-gray-700">客先名</label>
+                      <input type="text" name="customer" class="mt-1 block w-full rounded border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 border p-2">
+                    </div>
+                  </div>
+                  <div class="mt-4 border-t pt-2">
+                    <details class="text-xs">
+                      <summary class="cursor-pointer text-blue-600 font-medium select-none">読み取り全文（JSON）を表示</summary>
+                      <textarea id="modal-raw-text" class="w-full h-32 mt-2 p-2 border rounded bg-gray-50 text-gray-600 font-mono text-xs" readonly></textarea>
+                    </details>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+          <div class="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+            <button type="button" onclick="saveFromModal()" class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-green-600 text-base font-medium text-white hover:bg-green-700 focus:outline-none sm:ml-3 sm:w-auto sm:text-sm">
+              保存する
+            </button>
+            <button type="button" onclick="closeModal()" class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm">
+              キャンセル
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ローディング -->
+    <div id="loading" class="hidden fixed inset-0 bg-gray-900 bg-opacity-50 flex flex-col items-center justify-center z-[60]">
+      <div class="bg-white p-5 rounded-lg shadow-xl text-center w-64">
+        <div class="loader ease-linear rounded-full border-4 border-t-4 border-blue-200 h-10 w-10 mb-3 mx-auto"></div>
+        <h2 class="text-lg font-bold text-gray-700">AI解析中...</h2>
+        <p id="loading-text" class="text-gray-500 text-xs mt-1">画像を処理しています</p>
+      </div>
+    </div>
+
+    <script>
+      let selectedFiles = [];
+      let resultsData = [];
+      let historyLoaded = false;
+
+      // タブ切り替え
+      function switchTab(tabName) {
+        // コンテンツの表示切替
+        document.getElementById('view-scan').classList.add('hidden');
+        document.getElementById('view-history').classList.add('hidden');
+        document.getElementById('view-' + tabName).classList.remove('hidden');
+
+        // タブのアクティブ状態切替
+        document.getElementById('tab-scan').classList.remove('tab-active');
+        document.getElementById('tab-history').classList.remove('tab-active');
+        document.getElementById('tab-' + tabName).classList.add('tab-active');
+
+        // 履歴タブを開いたときにデータロード（初回のみ）
+        if (tabName === 'history' && !historyLoaded) {
+          loadHistory();
+        }
+      }
+
+      // 履歴データの読み込み
+      function loadHistory() {
+        const tbody = document.getElementById('history-table-body');
+        const loading = document.getElementById('history-loading');
+        const empty = document.getElementById('history-empty');
+        
+        tbody.innerHTML = '';
+        loading.classList.remove('hidden');
+        empty.classList.add('hidden');
+
+        google.script.run
+          .withSuccessHandler(function(history) {
+            loading.classList.add('hidden');
+            if (!history || history.length === 0) {
+              empty.classList.remove('hidden');
+              return;
+            }
+
+            historyLoaded = true;
+            
+            history.forEach(item => {
+              const tr = document.createElement('tr');
+              tr.innerHTML = `
+                <td class="px-3 py-3 text-xs text-gray-500">
+                  ${item.timestamp}
+                </td>
+                <td class="px-3 py-3 text-sm font-medium text-gray-900">
+                  ${item.partNumber}
+                </td>
+                <td class="px-3 py-3 text-right text-sm text-gray-900 font-mono">
+                  ${item.quantity}
+                </td>
+                <td class="px-3 py-3 text-xs text-gray-500">
+                  ${item.deliveryDate}
+                </td>
+                <td class="px-3 py-3 text-xs text-gray-500">
+                  ${item.orderDate}
+                </td>
+                <td class="px-3 py-3 text-xs text-gray-500">
+                  ${item.customer}
+                </td>
+                <td class="px-3 py-3 text-xs text-gray-500">
+                  ${item.orderNumber}
+                </td>
+                <td class="px-3 py-3 text-xs text-gray-400 truncate max-w-[100px]">
+                  <i class="far fa-file-image mr-1"></i>${item.fileName}
+                </td>
+              `;
+              tbody.appendChild(tr);
+            });
+          })
+          .withFailureHandler(function(err) {
+            loading.classList.add('hidden');
+            alert('履歴の取得に失敗しました: ' + err.message);
+          })
+          .getHistoryData();
+      }
+
+      // ---------------- 以下、既存のロジック ----------------
+
+      function handleFileSelect(input) {
+        const btn = document.getElementById('analyze-btn');
+        const listArea = document.getElementById('file-list-area');
+
+        if (input.files && input.files.length > 0) {
+          selectedFiles = Array.from(input.files);
+          
+          const list = document.getElementById('file-list');
+          const count = document.getElementById('file-count');
+          
+          listArea.classList.remove('hidden');
+          count.textContent = selectedFiles.length;
+          list.innerHTML = '';
+          
+          selectedFiles.forEach(f => {
+            const li = document.createElement('li');
+            li.innerHTML = `<i class="far fa-image mr-1"></i> ${f.name}`;
+            list.appendChild(li);
+          });
+
+          btn.disabled = false;
+          btn.className = "w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded shadow-lg transition transform active:scale-95 flex justify-center items-center";
+          btn.innerHTML = `<i class="fas fa-magic mr-2"></i>${selectedFiles.length}枚の画像を解析する`;
+          
+          document.getElementById('results-container').innerHTML = '';
+          resultsData = [];
+
+        } else {
+          listArea.classList.add('hidden');
+          btn.disabled = true;
+          btn.className = "w-full bg-gray-300 text-white font-bold py-3 px-4 rounded shadow-sm cursor-not-allowed transition duration-200 flex justify-center items-center";
+          btn.innerHTML = '<i class="fas fa-magic mr-2"></i>画像を選択してください';
+        }
+      }
+
+      async function startBatchOcr() {
+        if (selectedFiles.length === 0) return;
+
+        document.getElementById('loading').classList.remove('hidden');
+        document.getElementById('file-list-area').classList.add('hidden');
+        
+        let successCount = 0;
+        
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const file = selectedFiles[i];
+          document.getElementById('loading-text').textContent = `${i + 1} / ${selectedFiles.length} 枚目を解析中...`;
+          
+          try {
+            const result = await processSingleFile(file);
+            addResultCard(result, i);
+            resultsData.push(result);
+            if(result.success) successCount++;
+          } catch (e) {
+            console.error(e);
+            addResultCard({success: false, fileName: file.name, error: e.message}, i);
+          }
+        }
+
+        document.getElementById('loading').classList.add('hidden');
+        const btn = document.getElementById('analyze-btn');
+        btn.innerHTML = '<i class="fas fa-redo mr-2"></i>解析完了（再実行）';
+        
+        if (successCount > 0) {
+          document.getElementById('results-container').scrollIntoView({ behavior: 'smooth' });
+        } else {
+          alert('解析に失敗しました。');
+        }
+      }
+
+      function processSingleFile(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = function(e) {
+            const base64 = e.target.result;
+            google.script.run
+              .withSuccessHandler(resolve)
+              .withFailureHandler(reject)
+              .processImage(base64, file.name);
+          };
+          reader.readAsDataURL(file);
+        });
+      }
+
+      function addResultCard(result, index) {
+        const container = document.getElementById('results-container');
+        const div = document.createElement('div');
+        div.className = "bg-white rounded-lg shadow-sm border border-gray-200 p-4 transition hover:shadow-md";
+        div.id = `card-${index}`;
+
+        if (result.success) {
+          div.innerHTML = `
+            <div class="flex justify-between items-start mb-2">
+              <div class="flex items-center">
+                <div class="bg-green-100 text-green-600 rounded-full p-2 mr-3">
+                  <i class="fas fa-check"></i>
+                </div>
+                <div>
+                  <h4 class="font-bold text-sm text-gray-800 truncate w-40 md:w-64">${result.fileName}</h4>
+                  <span class="text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded">エンジン: ${result.mode}</span>
+                </div>
+              </div>
+              <span id="status-${index}" class="text-xs font-bold text-red-500 bg-red-50 px-2 py-1 rounded border border-red-100">未保存</span>
+            </div>
+            <div class="grid grid-cols-2 gap-2 text-xs text-gray-600 mb-3 bg-gray-50 p-2 rounded">
+              <div><span class="text-gray-400">品番:</span> ${result.data.partNumber || '-'}</div>
+              <div><span class="text-gray-400">数量:</span> ${result.data.quantity || '-'}</div>
+              <div><span class="text-gray-400">納期:</span> ${result.data.deliveryDate || '-'}</div>
+              <div><span class="text-gray-400">客先:</span> ${result.data.customer || '-'}</div>
+            </div>
+            <button onclick="openEditModal(${index})" class="w-full border border-blue-600 text-blue-600 hover:bg-blue-50 font-semibold py-2 px-4 rounded text-sm transition">
+              <i class="fas fa-edit mr-1"></i>確認・修正する
+            </button>
+          `;
+        } else {
+          div.innerHTML = `
+            <div class="flex items-center">
+              <div class="bg-red-100 text-red-600 rounded-full p-2 mr-3">
+                <i class="fas fa-exclamation-triangle"></i>
+              </div>
+              <div>
+                <h4 class="font-bold text-sm text-gray-800">${result.fileName}</h4>
+                <p class="text-xs text-red-500">解析エラー: ${result.error}</p>
+              </div>
+            </div>
+          `;
+        }
+        container.appendChild(div);
+      }
+
+      // 【修正】input[type=date] に値をセットするための変換関数
+      function formatDateForInput(dateStr) {
+        if (!dateStr) return '';
+        // "2025年12月1日", "2025/12/01", "2025-12-1" などから数字を抽出して yyyy-MM-dd に変換
+        const match = dateStr.match(/(\d{4})[\D]+(\d{1,2})[\D]+(\d{1,2})/);
+        if (match) {
+          const y = match[1];
+          const m = match[2].padStart(2, '0');
+          const d = match[3].padStart(2, '0');
+          return `${y}-${m}-${d}`;
+        }
+        // 既に yyyy-MM-dd 形式の場合
+        if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
+        
+        return '';
+      }
+
+      // 【修正】スプレッドシート保存用に8桁数値文字列に変換する関数
+      function formatDateForSheet(dateStr) {
+        if (!dateStr) return '';
+        // input type="date" の値 (yyyy-MM-dd) からハイフンを除去
+        return dateStr.replace(/-/g, '');
+      }
+
+      function openEditModal(index) {
+        const data = resultsData[index];
+        const form = document.getElementById('modal-form');
+        form.itemIndex.value = index;
+        form.fileName.value = data.fileName;
+        form.partNumber.value = data.data.partNumber;
+        form.quantity.value = data.data.quantity;
+        
+        // 【修正】日付をinput[type=date]用に変換してセット
+        form.deliveryDate.value = formatDateForInput(data.data.deliveryDate);
+        form.orderDate.value = formatDateForInput(data.data.orderDate);
+        
+        form.customer.value = data.data.customer;
+        form.mfgNumber.value = data.data.mfgNumber;
+        form.orderNumber.value = data.data.orderNumber;
+        
+        document.getElementById('modal-raw-text').value = data.rawText;
+        document.getElementById('edit-modal').classList.remove('hidden');
+        document.body.classList.add('modal-open');
+      }
+
+      function closeModal() {
+        document.getElementById('edit-modal').classList.add('hidden');
+        document.body.classList.remove('modal-open');
+      }
+
+      function saveFromModal() {
+        const form = document.getElementById('modal-form');
+        const index = form.itemIndex.value;
+        const formData = {
+          fileName: form.fileName.value,
+          partNumber: form.partNumber.value,
+          quantity: form.quantity.value,
+          // 【修正】カレンダーの値(yyyy-MM-dd)を8桁(yyyyMMdd)に変換して保存
+          deliveryDate: formatDateForSheet(form.deliveryDate.value),
+          orderDate: formatDateForSheet(form.orderDate.value),
+          customer: form.customer.value,
+          mfgNumber: form.mfgNumber.value,
+          orderNumber: form.orderNumber.value
+        };
+
+        const saveBtn = document.querySelector('#edit-modal button[onclick="saveFromModal()"]');
+        const originalText = saveBtn.innerText;
+        saveBtn.disabled = true;
+        saveBtn.innerText = '保存中...';
+
+        google.script.run
+          .withSuccessHandler(() => {
+            closeModal();
+            saveBtn.disabled = false;
+            saveBtn.innerText = originalText;
+            const statusBadge = document.getElementById(`status-${index}`);
+            statusBadge.className = "text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded border border-green-100";
+            statusBadge.innerHTML = '<i class="fas fa-check-circle mr-1"></i>保存済';
+            const card = document.getElementById(`card-${index}`);
+            const btn = card.querySelector('button');
+            btn.className = "w-full border border-gray-300 text-gray-400 bg-gray-50 cursor-not-allowed font-semibold py-2 px-4 rounded text-sm";
+            btn.innerHTML = '保存完了';
+            btn.disabled = true;
+            btn.removeAttribute('onclick');
+            resultsData[index].data = formData;
+            
+            // 履歴もリロードする（もし読み込み済みなら）
+            loadHistory();
+          })
+          .withFailureHandler((err) => {
+            alert('保存エラー: ' + err.message);
+            saveBtn.disabled = false;
+            saveBtn.innerText = originalText;
+          })
+          .saveToSheet(formData);
+      }
+    </script>
+  </body>
+</html>
