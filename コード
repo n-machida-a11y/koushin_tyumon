@@ -1,0 +1,258 @@
+/**
+ * Webアプリのページを表示する
+ */
+function doGet() {
+  return HtmlService.createTemplateFromFile('index')
+    .evaluate()
+    .setTitle('注文書OCR登録アプリ')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/**
+ * クライアントから送られた画像データを処理する
+ */
+function processImage(base64Data, fileName) {
+  let mode = 'Drive API';
+  let extractedData = {};
+  let rawText = "";
+
+  try {
+    // スクリプトプロパティからAPIキーを取得
+    const apiKey = PropertiesService.getScriptProperties().getProperty('OCR_API_KEY');
+    
+    if (apiKey) {
+      try {
+        // Gemini APIを実行
+        const geminiResult = executeGeminiApi(base64Data, apiKey);
+        
+        // データの正規化
+        extractedData = normalizeData(geminiResult);
+        
+        mode = 'Gemini 2.5 Pro';
+        rawText = JSON.stringify(extractedData, null, 2); 
+      } catch (e) {
+        console.warn("Gemini API error (Falling back to Drive API): " + e.toString());
+        // エラー時はDrive APIへフォールバック
+        rawText = executeDriveApi(base64Data, fileName);
+        extractedData = extractOrderDataWithRegex(rawText);
+        mode = 'Drive API (Fallback)';
+      }
+    } else {
+      // APIキーがない場合は最初からDrive API
+      rawText = executeDriveApi(base64Data, fileName);
+      extractedData = extractOrderDataWithRegex(rawText);
+    }
+    
+    return {
+      success: true,
+      mode: mode,
+      fileName: fileName,
+      rawText: rawText,
+      data: extractedData
+    };
+
+  } catch (e) {
+    return {
+      success: false,
+      fileName: fileName,
+      error: e.toString()
+    };
+  }
+}
+
+/**
+ * Geminiからのデータを正規化する
+ */
+function normalizeData(data) {
+  if (Array.isArray(data)) data = data[0];
+  if (!data || typeof data !== 'object') return {};
+
+  const normalized = {};
+  Object.keys(data).forEach(key => {
+    normalized[key.toLowerCase().replace(/[^a-z0-9]/g, '')] = data[key];
+  });
+
+  // 【修正】製番のハイフン以降を除去する処理を追加
+  let mfg = normalized['mfgnumber'] || normalized['serialnumber'] || normalized['no'] || '';
+  if (mfg && typeof mfg === 'string') {
+    // 全角ハイフンなども考慮して分割し、最初の部分だけを取得
+    mfg = mfg.split(/[-－]/)[0].trim();
+  }
+
+  return {
+    partNumber:   normalized['partnumber'] || normalized['partname'] || normalized['itemcode'] || '',
+    quantity:     normalized['quantity'] || normalized['qty'] || normalized['count'] || '',
+    deliveryDate: normalized['deliverydate'] || normalized['date'] || '',
+    orderDate:    normalized['orderdate'] || normalized['issuedate'] || '',
+    customer:     normalized['customer'] || normalized['customername'] || normalized['client'] || '',
+    mfgNumber:    mfg, // 整形済みの製番
+    orderNumber:  normalized['ordernumber'] || normalized['orderno'] || normalized['ponumber'] || ''
+  };
+}
+
+/**
+ * Gemini APIを実行
+ */
+function executeGeminiApi(base64Data, apiKey) {
+  const model = 'gemini-2.5-pro'; 
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  
+  const imageContent = base64Data.split(',')[1];
+  const mimeType = base64Data.split(';')[0].split(':')[1];
+
+  // プロンプトにも製番のルールを追加
+  const prompt = `
+    この注文書画像を解析し、以下の情報をJSON形式で抽出してください。
+    
+    抽出項目:
+    - partNumber (品番コードのみ。品名・名称・日本語説明は除外してください)
+    - quantity (数量・数)
+    - deliveryDate (納期・納入日)
+    - orderDate (受注日・注文日・発行日)
+    - customer (客先名・宛名)
+    - mfgNumber (製番。ハイフンや枝番は除外して本体の番号のみ抽出してください)
+    - orderNumber (注文番号・オーダーNo)
+    
+    ルール:
+    1. 値が存在しない場合は空文字 "" を設定してください。
+    2. 出力はMarkdownのコードブロック（\`\`\`json ... \`\`\`）を含めず、純粋なJSON文字列のみを返してください。
+    3. キー名は上記の英語名（キャメルケース）を使用してください。
+    4. partNumberには製品コード（例: "362-83852"）のみを抽出し、後ろに続く品名（例: "ケーブル..."）や括弧書きの補足情報はすべて削除してください。
+  `;
+
+  const payload = {
+    contents: [{
+      parts: [
+        { text: prompt },
+        { inline_data: { mime_type: mimeType, data: imageContent } }
+      ]
+    }],
+    generationConfig: {
+      response_mime_type: "application/json"
+    }
+  };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch(url, options);
+  const responseCode = response.getResponseCode();
+  const result = JSON.parse(response.getContentText());
+
+  if (responseCode !== 200) {
+    throw new Error(`Gemini API Error (${responseCode}): ${response.getContentText()}`);
+  }
+  
+  if (result.candidates && result.candidates[0].content && result.candidates[0].content.parts) {
+    let jsonString = result.candidates[0].content.parts[0].text;
+    jsonString = jsonString.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
+    return JSON.parse(jsonString);
+  } else {
+    throw new Error('Geminiからの応答を解析できませんでした。');
+  }
+}
+
+/**
+ * Drive APIを実行（フォールバック）
+ */
+function executeDriveApi(base64Data, fileName) {
+  const data = base64Data.split(',')[1];
+  const blob = Utilities.newBlob(Utilities.base64Decode(data), 'image/jpeg', fileName);
+  const tempFile = DriveApp.createFile(blob);
+  
+  try {
+    const resource = { title: "TempOCR_" + fileName, mimeType: "application/vnd.google-apps.document" };
+    const ocrFile = Drive.Files.copy(resource, tempFile.getId(), {ocr: true, ocrLanguage: 'ja'});
+    const doc = DocumentApp.openById(ocrFile.id);
+    const text = doc.getBody().getText();
+    DriveApp.getFileById(ocrFile.id).setTrashed(true);
+    return text;
+  } finally {
+    tempFile.setTrashed(true);
+  }
+}
+
+/**
+ * 正規表現抽出（フォールバック）
+ */
+function extractOrderDataWithRegex(text) {
+  return {
+    partNumber: findValue(text, /(?:品番|品名|Ｐ\/Ｎ|Code)[:：\s]+([^\n\r]+)/),
+    quantity: findValue(text, /(?:数量|数|QT|Qty)[:：\s]+([0-9,]+)/),
+    deliveryDate: findValue(text, /(?:納期|納入日)[:：\s]+([0-9]{4}[\/\-年][0-9]{1,2}[\/\-月][0-9]{1,2}日?)/),
+    orderDate: findValue(text, /(?:受注日|注文日|発行日)[:：\s]+([0-9]{4}[\/\-年][0-9]{1,2}[\/\-月][0-9]{1,2}日?)/),
+    customer: findValue(text, /(?:客先|得意先|宛名)[:：\s]+([^\n\r]+)/),
+    mfgNumber: findValue(text, /(?:製番|製造番号|No\.)[:：\s]+([A-Za-z0-9\-]+)/),
+    orderNumber: findValue(text, /(?:注文番号|オーダーNo)[:：\s]+([A-Za-z0-9\-]+)/)
+  };
+}
+
+function findValue(text, regex) {
+  const match = text.match(regex);
+  return match ? match[1].trim() : '';
+}
+
+/**
+ * スプレッドシートに保存
+ */
+function saveToSheet(formData) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  
+  // ヘッダー行を新しい構成に変更
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(['品番', '数量', '納期', '受注日', '客先', '製番', '注文番号', '登録日時', '画像']);
+  }
+  
+  sheet.appendRow([
+    formData.partNumber,
+    formData.quantity,
+    formData.deliveryDate, // yyyyMMdd形式で来る想定
+    formData.orderDate,    // yyyyMMdd形式で来る想定
+    formData.customer,
+    formData.mfgNumber,
+    formData.orderNumber,
+    new Date(),
+    formData.fileName
+  ]);
+  return { success: true };
+}
+
+/**
+ * 履歴取得
+ */
+function getHistoryData() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  
+  if (lastRow <= 1) return [];
+  
+  const data = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+  data.sort((a, b) => new Date(b[7]) - new Date(a[7]));
+  
+  return data.slice(0, 50).map(row => ({
+    partNumber: row[0],
+    quantity: row[1],
+    deliveryDate: row[2], 
+    orderDate: row[3],    
+    customer: row[4],
+    mfgNumber: row[5],
+    orderNumber: row[6],
+    timestamp: formatDate(row[7]),
+    fileName: row[8]
+  }));
+}
+
+function formatDate(date) {
+  if (!date) return '';
+  try {
+    return Utilities.formatDate(new Date(date), Session.getScriptTimeZone(), 'yyyy/MM/dd HH:mm');
+  } catch (e) {
+    return date;
+  }
+}
