@@ -79,74 +79,143 @@ function processImage(base64Data, fileName) {
  */
 function normalizeData(data) {
   if (!data) return {};
-  
+
+  // ネストされたオブジェクトを展開
   let source = Array.isArray(data) ? data[0] : data;
   if (source.data && typeof source.data === 'object') source = source.data;
   if (source.order && typeof source.order === 'object') source = source.order;
+  if (source.items && Array.isArray(source.items) && source.items.length > 0) {
+    source = Object.assign({}, source, source.items[0]);
+  }
 
+  // キーを小文字・記号除去で正規化し、マッピング用辞書を作成
   const n = {};
-  Object.keys(source).forEach(k => { 
-    n[k.toLowerCase().replace(/[^a-z0-9]/g, '')] = source[k]; 
+  Object.keys(source).forEach(k => {
+    const normalized = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+    n[normalized] = source[k];
   });
-  
-  let part = String(n['partnumber'] || n['partname'] || n['code'] || n['itemcode'] || n['productcode'] || '');
+
+  // 各フィールドの候補キーを優先順で定義
+  const pick = function(keys) {
+    for (let i = 0; i < keys.length; i++) {
+      var v = n[keys[i]];
+      if (v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim();
+    }
+    return '';
+  };
+
+  let part = pick(['partnumber', 'partno', 'partname', 'code', 'itemcode', 'productcode', 'modelno', 'model', 'hinban', 'kataban', 'zuban']);
   if (part) {
     part = part.split('(')[0].split('（')[0].trim();
   }
 
-  let mfg = String(n['mfgnumber'] || n['serialnumber'] || n['no'] || n['jobnumber'] || n['seiban'] || '');
-  if (mfg) {
-    mfg = mfg.split(/[-－]/)[0].trim();
-  }
-  
+  let qty = pick(['quantity', 'qty', 'count', 'suryou', 'kosu']);
+  qty = qty.replace(/[^0-9.]/g, '');
+
+  let mfg = pick(['mfgnumber', 'mfgno', 'seiban', 'serialnumber', 'jobnumber', 'jobno', 'seizouban']);
+
   return {
     partNumber:   part,
-    quantity:     String(n['quantity'] || n['qty'] || n['count'] || '').replace(/[^0-9.]/g, ''),
-    deliveryDate: String(n['deliverydate'] || n['duedate'] || n['date'] || n['delivery'] || ''),
-    orderDate:    String(n['orderdate'] || n['issuedate'] || n['order'] || ''),
-    customer:     String(n['customer'] || n['customername'] || n['client'] || n['company'] || ''),
+    quantity:     qty,
+    deliveryDate: pick(['deliverydate', 'duedate', 'delivery', 'nouki', 'nounyuubi']),
+    orderDate:    pick(['orderdate', 'issuedate', 'date', 'chumonbi', 'hatchuubi']),
+    customer:     pick(['customer', 'customername', 'client', 'company', 'companyname', 'kyakusaki', 'hatchumoto']),
     mfgNumber:    mfg,
-    orderNumber:  String(n['ordernumber'] || n['orderno'] || n['ponumber'] || n['po'] || '')
+    orderNumber:  pick(['ordernumber', 'orderno', 'ponumber', 'po', 'pono', 'chumonbangou', 'hatchubangou'])
   };
 }
 
 /**
- * Gemini APIを実行
+ * Gemini APIを実行（リトライ付き）
  */
 function executeGeminiApi(base64Data, apiKey) {
-  const modelId = "gemini-2.5-pro"; 
+  const MAX_RETRIES = 2;
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      if (attempt > 0) {
+        console.log("リトライ " + attempt + " 回目...");
+        Utilities.sleep(1000 * attempt);
+      }
+      return executeGeminiApiOnce(base64Data, apiKey);
+    } catch (e) {
+      lastError = e;
+      console.warn("API試行 " + (attempt + 1) + " 失敗: " + e.message);
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Gemini API 1回分の実行
+ */
+function executeGeminiApiOnce(base64Data, apiKey) {
+  const modelId = "gemini-2.5-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
-  
-  const prompt = `
-    注文書画像を解析し、以下の項目を正確に抽出してJSON形式で返してください。
-    
-    【抽出項目】
-    1. partNumber: 品番コード。カッコ書きの数値や、後ろに続く品名などは含めず、純粋なコードのみを抽出してください。
-    2. quantity: 数量。数値のみ。
-    3. deliveryDate: 納期。
-    4. orderDate: 注文日。
-    5. customer: 客先名。
-    6. mfgNumber: 製番。
-    7. orderNumber: 注文番号。
-    
-    【ルール】
-    - 返信は純粋なJSONオブジェクトのみ。Markdown装飾( \`\`\`json 等)は絶対に含めないでください。
-    - 見つからない項目は空文字 "" にしてください。
-  `;
+
+  const prompt = `あなたは日本の製造業向け注文書（発注書・Purchase Order）を正確に読み取る専門AIです。
+画像に含まれる注文書を解析し、以下の7項目を抽出してJSON形式で返してください。
+
+【抽出項目と探し方のヒント】
+1. "partNumber": 品番・型番・品目コード（例: ABC-1234, M10×30 等）
+   - 「品番」「型番」「Part No.」「品目コード」「図番」「型式」などのラベル付近を探す
+   - カッコ内の補足説明・品名・仕様説明は含めず、コード部分のみ抽出
+
+2. "quantity": 数量（数値のみ。例: 100）
+   - 「数量」「Qty」「数」「個数」「入数」などのラベル付近を探す
+   - 単位（個、本、台、セット等）は除外し数値のみ
+
+3. "deliveryDate": 納期・納入日（例: 2025年4月15日, 2025/04/15）
+   - 「納期」「納入日」「希望納期」「Delivery」「Del.Date」などのラベル付近を探す
+   - 日付はそのまま記載通りに抽出
+
+4. "orderDate": 注文日・発注日（例: 2025年3月20日, 2025/03/20）
+   - 「注文日」「発注日」「日付」「Date」などのラベル付近、または書類上部の日付を探す
+
+5. "customer": 客先名・発注元の会社名
+   - 「御中」の前にある会社名、または「発注者」「注文者」「From」付近を探す
+   - 株式会社・(株)・有限会社なども含めて正式名称で抽出
+
+6. "mfgNumber": 製番・製造番号
+   - 「製番」「製造番号」「Seiban」「Job No.」などのラベル付近を探す
+
+7. "orderNumber": 注文番号・発注番号
+   - 「注文番号」「注文No.」「PO No.」「発注番号」「Order No.」などのラベル付近を探す
+
+【重要ルール】
+- 返信は純粋なJSONオブジェクトのみ（キーは上記の英語名を厳守）
+- 画像が不鮮明でも、読み取れる範囲で最善を尽くして抽出する
+- 確実に読めない項目・存在しない項目のみ空文字 "" にする
+- 表形式の場合、複数行あっても1行目（主要な注文行）を優先的に抽出
+- 日付はフォーマットを変換せず、画像に記載されている通りに抽出する`;
 
   const payload = {
-    contents: [{ 
+    contents: [{
       parts: [
-        { text: prompt }, 
+        { text: prompt },
         { inline_data: { mime_type: base64Data.split(';')[0].split(':')[1], data: base64Data.split(',')[1] } }
-      ] 
+      ]
     }],
-    generationConfig: { 
+    generationConfig: {
       response_mime_type: "application/json",
+      response_schema: {
+        type: "object",
+        properties: {
+          partNumber:   { type: "string" },
+          quantity:     { type: "string" },
+          deliveryDate: { type: "string" },
+          orderDate:    { type: "string" },
+          customer:     { type: "string" },
+          mfgNumber:    { type: "string" },
+          orderNumber:  { type: "string" }
+        },
+        required: ["partNumber", "quantity", "deliveryDate", "orderDate", "customer", "mfgNumber", "orderNumber"]
+      },
       temperature: 0.1
     }
   };
-  
+
   const options = {
     method: 'post',
     contentType: 'application/json',
@@ -159,16 +228,50 @@ function executeGeminiApi(base64Data, apiKey) {
   const responseText = res.getContentText();
 
   if (responseCode !== 200) {
-    throw new Error(`APIエラー(${responseCode}): ${responseText}`);
+    throw new Error(`APIエラー(${responseCode}): ${responseText.substring(0, 300)}`);
   }
 
   const result = JSON.parse(responseText);
-  if (result.candidates && result.candidates[0].content && result.candidates[0].content.parts) {
-    let jsonString = result.candidates[0].content.parts[0].text;
-    jsonString = jsonString.replace(/```json/g, "").replace(/```/g, "").trim();
-    return JSON.parse(jsonString);
+
+  if (!result.candidates || !result.candidates[0] || !result.candidates[0].content || !result.candidates[0].content.parts) {
+    throw new Error("解析結果の構造が不正です: " + responseText.substring(0, 200));
   }
-  throw new Error("解析結果の構造が不正です。");
+
+  let jsonString = result.candidates[0].content.parts[0].text;
+  return safeParseJson(jsonString);
+}
+
+/**
+ * 堅牢なJSONパース（Markdownラップや不正文字に対応）
+ */
+function safeParseJson(text) {
+  if (!text || !text.trim()) throw new Error("空のレスポンス");
+
+  let cleaned = text.trim();
+
+  // Markdownコードブロックの除去
+  cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+  // BOM除去
+  cleaned = cleaned.replace(/^\uFEFF/, '');
+
+  // 先頭・末尾の不正文字を除去してJSON部分を抽出
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    cleaned = jsonMatch[0];
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    // 制御文字の除去を試みる
+    cleaned = cleaned.replace(/[\x00-\x1F\x7F]/g, ' ');
+    try {
+      return JSON.parse(cleaned);
+    } catch (e2) {
+      throw new Error("JSONパース失敗: " + text.substring(0, 200));
+    }
+  }
 }
 
 /**

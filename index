@@ -197,6 +197,46 @@
     <script>
       let selectedFiles = [];
       let resultsData = [];
+      const MAX_IMAGE_WIDTH = 1600;
+      const MAX_IMAGE_HEIGHT = 1600;
+      const JPEG_QUALITY = 0.85;
+
+      /**
+       * 画像をリサイズ・圧縮してbase64で返す
+       */
+      function compressImage(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = function(e) {
+            const img = new Image();
+            img.onload = function() {
+              let w = img.width;
+              let h = img.height;
+
+              // 既に十分小さい場合はそのまま返す
+              if (w <= MAX_IMAGE_WIDTH && h <= MAX_IMAGE_HEIGHT && file.size < 500000) {
+                resolve(e.target.result);
+                return;
+              }
+
+              // アスペクト比を保ったままリサイズ
+              if (w > MAX_IMAGE_WIDTH) { h = Math.round(h * MAX_IMAGE_WIDTH / w); w = MAX_IMAGE_WIDTH; }
+              if (h > MAX_IMAGE_HEIGHT) { w = Math.round(w * MAX_IMAGE_HEIGHT / h); h = MAX_IMAGE_HEIGHT; }
+
+              const canvas = document.createElement('canvas');
+              canvas.width = w;
+              canvas.height = h;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0, w, h);
+              resolve(canvas.toDataURL('image/jpeg', JPEG_QUALITY));
+            };
+            img.onerror = () => reject(new Error('画像の読み込みに失敗'));
+            img.src = e.target.result;
+          };
+          reader.onerror = () => reject(new Error('ファイルの読み込みに失敗'));
+          reader.readAsDataURL(file);
+        });
+      }
 
       // 初期化: スプレッドシートURLの取得
       window.onload = function() {
@@ -341,15 +381,20 @@
           const file = filesToProcess[i];
           document.getElementById('loading-text').textContent = `${i + 1} / ${filesToProcess.length} 枚目を解析中...`;
           
+          let base64;
+          try {
+            base64 = await compressImage(file);
+          } catch (compErr) {
+            resultsData.push({success: false, fileName: file.name, error: '画像圧縮失敗: ' + compErr.message});
+            addResultCard(resultsData[resultsData.length - 1], i);
+            continue;
+          }
+
           const result = await new Promise(resolve => {
-            const reader = new FileReader();
-            reader.onload = e => {
-              google.script.run
-                .withSuccessHandler(resolve)
-                .withFailureHandler(err => resolve({success: false, fileName: file.name, error: err.message}))
-                .processImage(e.target.result, file.name);
-            };
-            reader.readAsDataURL(file);
+            google.script.run
+              .withSuccessHandler(resolve)
+              .withFailureHandler(err => resolve({success: false, fileName: file.name, error: err.message}))
+              .processImage(base64, file.name);
           });
           
           resultsData.push(result);
