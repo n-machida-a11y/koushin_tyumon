@@ -286,7 +286,7 @@ function saveToSheet(f) {
     f.quantity, 
     f.deliveryDate, 
     f.orderDate, 
-    f.customer, 
+    "株式会社島津製作所",
     f.mfgNumber, 
     f.orderNumber, 
     now, 

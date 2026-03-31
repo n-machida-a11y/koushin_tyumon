@@ -418,7 +418,7 @@
             <div class="grid grid-cols-2 gap-3 text-xs bg-gray-50 p-3 rounded-lg border border-gray-100">
               <div><span class="text-gray-400">品番:</span> <span class="font-bold">${res.data.partNumber || '-'}</span></div>
               <div><span class="text-gray-400">数量:</span> <span class="font-bold text-blue-600 text-sm">${res.data.quantity || '0'}</span></div>
-              <div><span class="text-gray-400">客先:</span> <span class="font-bold">${res.data.customer || '-'}</span></div>
+              <div><span class="text-gray-400">客先:</span> <span class="font-bold">株式会社島津製作所</span></div>
               <div><span class="text-gray-400">納期:</span> <span class="font-bold">${res.data.deliveryDate || '-'}</span></div>
             </div>
             <button onclick="openEditModal(${idx})" class="w-full mt-3 bg-white border-2 border-blue-600 text-blue-600 py-2 rounded-lg text-xs font-bold hover:bg-blue-50 transition">
@@ -447,7 +447,7 @@
         f.quantity.value = d.data.quantity;
         f.deliveryDate.value = formatDateForInput(d.data.deliveryDate);
         f.orderDate.value = formatDateForInput(d.data.orderDate);
-        f.customer.value = d.data.customer;
+        f.customer.value = '株式会社島津製作所';
         f.mfgNumber.value = d.data.mfgNumber;
         f.orderNumber.value = d.data.orderNumber;
         
